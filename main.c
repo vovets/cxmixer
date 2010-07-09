@@ -6,16 +6,6 @@
 #include "main.h"
 #include "queue.h"
 
-static u16_t input_event_pack(const struct input_event_t* e) {
-    union input_eventu_t u;
-    u.n = 0;
-    u.e.type = e->type;
-    u.e.ch0 = e->input[0];
-    u.e.ch1 = e->input[1];
-    u.e.timer = e->timer;
-    return u.n;
-}
-
 void input_event_unpack(struct input_event_t* e, u16_t n) {
     union input_eventu_t u;
     u.n = n;
@@ -75,13 +65,14 @@ static void setup_io(void) {
 
 static void setup_timer1(void) {
     /* TCCR1_CS13 = 1; */
-    /* TCCR1_CS12 = 1; */
-    TCCR1_CS11 = 1;
+    TCCR1_CS12 = 1;
+    /* TCCR1_CS11 = 1; */
     /* TCCR1_CS10 = 1; */
 }
 
 static void setup_interrupts(void) {
-    PCMSK |= (1<<CH0BIT)+(1<<CH1BIT);
+    PCMSK |= (1<<CH0BIT);
+    /* PCMSK |= (1<<CH0BIT)+(1<<CH1BIT); */
     GIMSK_PCIE = 1;
     TIMSK_TOIE1 = 1;
 }
@@ -96,7 +87,7 @@ static void on_channel_value_normal(u8_t channel, u16_t width);
 
 //global variables
 QUEUE_DEF(input, 16, INPUT_QUEUE_SIZE)
-QUEUE_DEF(channel, 16, 16)
+QUEUE_DEF(channel, 16, 32)
 static struct state_t state;
 static input_event_handler_t input_event_handlers[] = {
     &process_input_event_pc,
@@ -127,19 +118,17 @@ __interrupt void timer1_ovf(void);
 __interrupt void pcint(void);
 
 __interrupt void timer1_ovf(void) {
-    struct input_event_t e;
-    ZERO(e);
-    e.type = ET_TOF;
-    input_queue_put(input_event_pack(&e));
+    u16_t e = 1;
+    input_queue_put(e);
 }
 
 __interrupt void pcint(void) {
-    struct input_event_t e;
-    e.timer = TCNT1;
-    e.input[0] = CH0PIN;
-    e.input[1] = CH1PIN;
-    e.type = ET_PC;
-    input_queue_put(input_event_pack(&e));
+    u16_t e = TCNT1;
+    u8_t input = PINB;
+    e <<= 8;
+    input <<= 1;
+    e |= input;
+    input_queue_put(e);
 }
 
 static void process_input_event(const struct input_event_t* e) {

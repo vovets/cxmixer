@@ -24,13 +24,14 @@ union input_eventu_t {
     u16_t n;
     struct {
         u8_t type:1;
+        u8_t dummy:2;
         u8_t ch0:1;
         u8_t ch1:1;
+        u8_t pad:3;
         u8_t timer;
     } e;
 };
 
-u16_t input_event_pack(const struct input_event_t* e);
 void input_event_unpack(struct input_event_t* e, u16_t n);
 
 struct channel_state_t {

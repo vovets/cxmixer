@@ -63,7 +63,7 @@
         </option>
         <option>
           <name>SCCStackSize</name>
-          <state>0x40</state>
+          <state>0x28</state>
         </option>
         <option>
           <name>SCExtCStack</name>
@@ -329,12 +329,12 @@
         <option>
           <name>CCOptimization</name>
           <version>1</version>
-          <state>1</state>
+          <state>4</state>
         </option>
         <option>
           <name>CCAllowList</name>
           <version>3</version>
-          <state>000000</state>
+          <state>111111</state>
         </option>
         <option>
           <name>CCCrossCallPassesList</name>
@@ -433,7 +433,7 @@
         <option>
           <name>CCOptimizationSlave</name>
           <version>1</version>
-          <state>1</state>
+          <state>4</state>
         </option>
         <option>
           <name>CCOutputFile</name>
