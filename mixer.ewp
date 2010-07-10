@@ -259,7 +259,7 @@
         </option>
         <option>
           <name>CCListCFile</name>
-          <state>0</state>
+          <state>1</state>
         </option>
         <option>
           <name>CCListCMnemonics</name>
@@ -1039,7 +1039,7 @@
         </option>
         <option>
           <name>SCCStackSize</name>
-          <state>0x40</state>
+          <state>0x28</state>
         </option>
         <option>
           <name>SCExtCStack</name>
@@ -1235,7 +1235,7 @@
         </option>
         <option>
           <name>CCListCFile</name>
-          <state>0</state>
+          <state>1</state>
         </option>
         <option>
           <name>CCListCMnemonics</name>
@@ -1675,7 +1675,7 @@
         </option>
         <option>
           <name>OutputFile</name>
-          <state>mixer.d90</state>
+          <state>mixer.a90</state>
         </option>
         <option>
           <name>OutputFormat</name>
@@ -1833,7 +1833,7 @@
         </option>
         <option>
           <name>DebugInformation</name>
-          <state>0</state>
+          <state>1</state>
         </option>
         <option>
           <name>RuntimeControl</name>
@@ -1845,7 +1845,7 @@
         </option>
         <option>
           <name>AllowExtraOutput</name>
-          <state>1</state>
+          <state>0</state>
         </option>
         <option>
           <name>GenerateExtraOutput</name>

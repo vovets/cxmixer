@@ -13,6 +13,7 @@ void input_event_unpack(struct input_event_t* e, u16_t n) {
     e->input[0] = u.e.ch0;
     e->input[1] = u.e.ch1;
     e->timer = u.e.timer;
+    e->tof = u.e.tof;
 }
 
 static u8_t is_jumper_installed(void) {
@@ -71,8 +72,8 @@ static void setup_timer1(void) {
 }
 
 static void setup_interrupts(void) {
-    PCMSK |= (1<<CH0BIT);
-    /* PCMSK |= (1<<CH0BIT)+(1<<CH1BIT); */
+    /* PCMSK |= (1<<CH0BIT); */
+    PCMSK |= (1<<CH0BIT)+(1<<CH1BIT);
     GIMSK_PCIE = 1;
     TIMSK_TOIE1 = 1;
 }
@@ -86,8 +87,8 @@ static void on_channel_value_calibration(u8_t channel, u16_t width);
 static void on_channel_value_normal(u8_t channel, u16_t width);
 
 //global variables
-QUEUE_DEF(input, 16, INPUT_QUEUE_SIZE)
-QUEUE_DEF(channel, 16, 32)
+QUEUE_VARS(input)
+QUEUE_VARS(channel)
 static struct state_t state;
 static input_event_handler_t input_event_handlers[] = {
     &process_input_event_pc,
@@ -98,14 +99,15 @@ void main(void) {
     setup_io();
     setup_timer1();
     setup_interrupts();
-    input_queue_init();
-    channel_queue_init();
     state_init();
     __enable_interrupt();
     while (1) {
-        while (input_queue_not_empty_monitor()) {
+        u8_t value_read = 0;
+        u16_t value;
+        QUEUE_GET(input, value, value_read);
+        if (value_read) {
             struct input_event_t e;
-            input_event_unpack(&e, input_queue_get_monitor());
+            input_event_unpack(&e, value);
             process_input_event(&e);
         }
     }
@@ -118,37 +120,44 @@ __interrupt void timer1_ovf(void);
 __interrupt void pcint(void);
 
 __interrupt void timer1_ovf(void) {
-    u16_t e = 1;
-    input_queue_put(e);
+    QUEUE_PUT(input, 1);
 }
 
 __interrupt void pcint(void) {
+    u8_t tof = TIFR_TOV1;
     u16_t e = TCNT1;
-    u8_t input = PINB;
+    union {
+        u8_t input;
+        struct {
+            u8_t bit0:1;
+            u8_t bit1:1;
+        } bits;
+    };
+    input = PINB;
+    bits.bit0 = 0;
+    bits.bit1 = tof;
     e <<= 8;
-    input <<= 1;
     e |= input;
-    input_queue_put(e);
+    QUEUE_PUT(input, e);
 }
 
 static void process_input_event(const struct input_event_t* e) {
     input_event_handlers[e->type](e);
 }
 
-static void on_rising_edge(u8_t channel, u8_t timer_value) {
-    state.channels[channel].timer = timer_value;
-    state.channels[channel].timer_cycles = 0;
+static void on_rising_edge(u8_t channel, const struct input_event_t* e) {
+    state.channels[channel].timer = e->timer;
+    state.channels[channel].timer_cycles = (e->tof || !e->timer) ? -1 : 0;
     state.channels[channel].input = 1;
 }
 
-static void on_fallig_edge(u8_t channel, u8_t timer_value) {
-    u16_t width = state.channels[channel].timer_cycles;
-    if (!timer_value)
-	++width;
-    if (!state.channels[channel].timer)
-	--width;
+static void on_fallig_edge(u8_t channel, const struct input_event_t* e) {
+    i8_t tc = state.channels[channel].timer_cycles;
+    if (e->tof || !e->timer)
+        ++tc;
+    u16_t width = tc;
     width <<= 8;
-    width += timer_value;
+    width += e->timer;
     width -= state.channels[channel].timer;
     state.channels[channel].input = 0;
     on_channel_value(channel, width);
@@ -157,10 +166,10 @@ static void on_fallig_edge(u8_t channel, u8_t timer_value) {
 static void process_input_event_pc_channel(u8_t channel, const struct input_event_t* e) {
     if (state.channels[channel].input) {
         if (!e->input[channel])
-            on_fallig_edge(channel, e->timer);
+            on_fallig_edge(channel, e);
     } else {
         if (e->input[channel])
-            on_rising_edge(channel, e->timer);
+            on_rising_edge(channel, e);
     }
 }
 
@@ -171,7 +180,7 @@ static void process_input_event_pc(const struct input_event_t* e) {
 
 static void process_input_event_tof_channel(u8_t channel) {
     if (state.channels[channel].input)
-	++state.channels[channel].timer_cycles;
+        ++state.channels[channel].timer_cycles;
 }
 
 static void process_input_event_tof(const struct input_event_t* e) {
@@ -182,32 +191,39 @@ static void process_input_event_tof(const struct input_event_t* e) {
 static void state_init() {
     ZERO(state);
     state.calibration = is_jumper_installed();
+    state.min = 0xffff;
 }
 
 static void on_channel_value(u8_t channel, u16_t width) {
     if (state.calibration)
-	on_channel_value_calibration(channel, width);
+        on_channel_value_calibration(channel, width);
     else
-	on_channel_value_normal(channel, width);
+        on_channel_value_normal(channel, width);
 }
 
 static void on_channel_value_calibration(u8_t channel, u16_t width) {
     if (channel != state.calibration_channel)
-	return;
+        return;
     if (width == state.calibration_width) {
-	++state.calibration_count;
-	if (state.calibration_count > 50)
-	    LEDPORT = 1;
+        ++state.calibration_count;
+        if (state.calibration_count > 50)
+            LEDPORT = 1;
     } else {
-	state.calibration_width = width;
-	state.calibration_count = 0;
+        state.calibration_width = width;
+        state.calibration_count = 0;
     }
 }
 
 static void on_channel_value_normal(u8_t channel, u16_t width) {
     if (!channel) {
-	if (!channel_queue_not_full())
-	    channel_queue_get();
-	channel_queue_put(width);
+        if (QUEUE_FULL(channel)) {
+            QUEUE_RI(channel) = QUEUE_NEXT(channel, QUEUE_RI(channel));
+        }
+        QUEUE_PUT(channel, width);
+        state.min = MIN(state.min, width);
+        state.max = MAX(state.max, width);
+        /* if (width < 1164 || width > 1170) { */
+        /*     LEDPORT = 1; */
+        /* } */
     }
 }
