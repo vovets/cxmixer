@@ -138,7 +138,7 @@ __interrupt void pcint(void) {
     bits.bit1 = tof;
     e <<= 8;
     e |= input;
-    QUEUE_PUT(input, input_queue, e);
+    QUEUE_PUT_UNSAFE(input, input_queue, e);
 }
 
 static void process_input_event(const struct input_event_t* e) {

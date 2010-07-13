@@ -28,6 +28,13 @@
         }                                                               \
     } while (0)
 
+#define QUEUE_PUT_UNSAFE(T, N, V)                                       \
+    do {                                                                \
+        u8_t tmp = QUEUE_NEXT(T, N.write_index);                        \
+        N.buf[tmp] = V;                                                 \
+        N.write_index = tmp;                                            \
+    } while (0)
+
 #define QUEUE_GET(T, N, V, B)                    \
     do {                                         \
         u8_t tmp = N.read_index;                 \
