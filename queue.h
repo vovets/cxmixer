@@ -23,7 +23,7 @@
     do {                                                                \
         u8_t tmp = QUEUE_NEXT(T, N.write_index);                        \
         if (tmp != N.read_index) {                                      \
-            N.buf[tmp] = V;                                             \
+            N.buf[N.write_index] = V;                                   \
             N.write_index = tmp;                                        \
         }                                                               \
     } while (0)
@@ -31,7 +31,7 @@
 #define QUEUE_PUT_UNSAFE(T, N, V)                                       \
     do {                                                                \
         u8_t tmp = QUEUE_NEXT(T, N.write_index);                        \
-        N.buf[tmp] = V;                                                 \
+        N.buf[N.write_index] = V;                                       \
         N.write_index = tmp;                                            \
     } while (0)
 

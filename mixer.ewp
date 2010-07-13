@@ -324,7 +324,7 @@
         </option>
         <option>
           <name>CCOptSizeSpeed</name>
-          <state>1</state>
+          <state>0</state>
         </option>
         <option>
           <name>CCOptimization</name>
@@ -428,7 +428,7 @@
         </option>
         <option>
           <name>CCOptSizeSpeedSlave</name>
-          <state>1</state>
+          <state>0</state>
         </option>
         <option>
           <name>CCOptimizationSlave</name>

@@ -6,14 +6,14 @@
 #include "main.h"
 #include "queue.h"
 
-void input_event_unpack(struct input_event_t* e, u16_t n) {
-    union input_eventu_t u;
-    u.n = n;
-    e->type = (enum input_event_type_t)u.e.type;
-    e->input[0] = u.e.ch0;
-    e->input[1] = u.e.ch1;
-    e->timer = u.e.timer;
-    e->tof = u.e.tof;
+void input_event_unpack(struct input_event_t* e, input_queue_value_t v) {
+    e->type = v.type;
+    union pinb_t u;
+    u.n = v.pinb;
+    e->input[0] = u.b.ch0;
+    e->input[1] = u.b.ch1;
+    e->timer = v.timer;
+    e->tof = v.tof;
 }
 
 static u8_t is_jumper_installed(void) {
@@ -103,7 +103,7 @@ void main(void) {
     __enable_interrupt();
     while (1) {
         u8_t value_read = 0;
-        u16_t value;
+        input_queue_value_t value;
         QUEUE_GET(input, input_queue, value, value_read);
         if (value_read) {
             struct input_event_t e;
@@ -120,25 +120,18 @@ __interrupt void timer1_ovf(void);
 __interrupt void pcint(void);
 
 __interrupt void timer1_ovf(void) {
-    QUEUE_PUT(input, input_queue, 1);
+    input_queue_value_t v;
+    v.type = ET_TOF;
+    QUEUE_PUT_UNSAFE(input, input_queue, v);
 }
 
 __interrupt void pcint(void) {
-    u8_t tof = TIFR_TOV1;
-    u16_t e = TCNT1;
-    union {
-        u8_t input;
-        struct {
-            u8_t bit0:1;
-            u8_t bit1:1;
-        } bits;
-    };
-    input = PINB;
-    bits.bit0 = 0;
-    bits.bit1 = tof;
-    e <<= 8;
-    e |= input;
-    QUEUE_PUT_UNSAFE(input, input_queue, e);
+    input_queue_value_t v;
+    v.tof = TIFR_TOV1;
+    v.timer = TCNT1;
+    v.pinb = PINB;
+    v.type = ET_PC;
+    QUEUE_PUT_UNSAFE(input, input_queue, v);
 }
 
 static void process_input_event(const struct input_event_t* e) {
@@ -191,6 +184,8 @@ static void process_input_event_tof(const struct input_event_t* e) {
 static void state_init() {
     ZERO(state);
     state.calibration = is_jumper_installed();
+    state.channels[0].min = 0xffff;
+    state.channels[1].min = 0xffff;
 }
 
 static void on_channel_value(u8_t channel, u16_t width) {
@@ -199,10 +194,12 @@ static void on_channel_value(u8_t channel, u16_t width) {
         QUEUE_PUT(channel, channel_queue[channel], width);
         return;
     }
-    u16_t filtered = state.channels[channel].width_sum >> 4;
+    u16_t filtered = (state.channels[channel].width_sum + width) / channel_queue_size;
     u8_t value_read;
     u16_t value;
     QUEUE_GET(channel, channel_queue[channel], value, value_read);
+    state.channels[channel].min = MIN(state.channels[channel].min, value);
+    state.channels[channel].max = MAX(state.channels[channel].max, value);
     state.channels[channel].width_sum -= value;
     state.channels[channel].width_sum += width;
     QUEUE_PUT(channel, channel_queue[channel], width);
