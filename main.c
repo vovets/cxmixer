@@ -7,11 +7,9 @@
 #include "queue.h"
 
 void input_event_unpack(struct input_event_t* e, input_queue_value_t v) {
-    e->type = v.type;
-    union pinb_t u;
-    u.n = v.pinb;
-    e->input[0] = u.b.ch0;
-    e->input[1] = u.b.ch1;
+    e->type = (enum input_event_type_t)v.type;
+    e->input[0] = v.ch0;
+    e->input[1] = v.ch1;
     e->timer = v.timer;
     e->tof = v.tof;
 }
@@ -68,7 +66,7 @@ static void setup_timer1(void) {
     /* TCCR1_CS13 = 1; */
     TCCR1_CS12 = 1;
     /* TCCR1_CS11 = 1; */
-    /* TCCR1_CS10 = 1; */
+    TCCR1_CS10 = 1;
 }
 
 static void setup_interrupts(void) {
@@ -129,7 +127,8 @@ __interrupt void pcint(void) {
     input_queue_value_t v;
     v.tof = TIFR_TOV1;
     v.timer = TCNT1;
-    v.pinb = PINB;
+    v.ch0 = CH0PIN;
+    v.ch1 = CH1PIN;
     v.type = ET_PC;
     QUEUE_PUT_UNSAFE(input, input_queue, v);
 }

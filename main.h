@@ -27,10 +27,11 @@ enum input_event_type_t {
 };
 
 typedef struct {
-    enum input_event_type_t type;
-    u8_t tof;
-    u8_t timer;
-    u8_t pinb;
+    u8_t type:1;
+    u8_t tof:1;
+    u8_t ch0:1;
+    u8_t ch1:1;
+    u8_t timer:8;
 } input_queue_value_t;
 typedef u16_t channel_queue_value_t;
 typedef u16_t filtered_queue_value_t;
