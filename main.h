@@ -16,16 +16,14 @@
 #define MAX(A, B) ((A) > (B) ? (A) : (B))
 
 enum {
-    input_queue_size = 4,
-    channel_queue_size = 16,
+    input_queue_size = 16,
+    channel_queue_size = 8,
     filtered_queue_size = 4
 };
 
-typedef u16_t input_queue_value_t;
 typedef u16_t channel_queue_value_t;
 typedef u16_t filtered_queue_value_t;
 
-QUEUE_TYPE(input);
 QUEUE_TYPE(channel);
 QUEUE_TYPE(filtered);
 
@@ -41,26 +39,23 @@ struct input_event_t {
     u8_t tof;
 };
 
-union input_eventu_t {
-    u16_t n;
+union pinb_t {
+    u8_t n;
     struct {
-        u8_t type:1;
-        u8_t tof:1;
+        u8_t pad01:2;
         u8_t ch0:1;
         u8_t ch1:1;
-        u8_t pad:4;
-        u8_t timer;
-    } e;
+        u8_t pad47:4;
+    } b;
 };
-
-void input_event_unpack(struct input_event_t* e, u16_t n);
 
 struct channel_state_t {
     u8_t input;
     u8_t timer;
     i8_t timer_cycles;
     u16_t width_sum;
-    u8_t points;
+    u16_t min;
+    u16_t max;
 };
 
 struct state_t {
