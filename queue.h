@@ -6,39 +6,38 @@
 #define CONCAT1(x,y) x ## y
 #define CONCAT(x,y)  CONCAT1(x,y)
 
-#define QUEUEB(N) CONCAT(N, _queue)
-#define QUEUE_BUF(N) CONCAT(QUEUEB(N), _buffer)
-#define QUEUE_VALUE_TYPE(N) CONCAT(QUEUEB(N), _value_t)
-#define QUEUE_SIZE(N) CONCAT(QUEUEB(N), _size)
-#define QUEUE_RI(N) CONCAT(QUEUEB(N), _read_index)
-#define QUEUE_WI(N) CONCAT(QUEUEB(N), _write_index)
+#define QUEUEB(A) CONCAT(A, _queue)
+#define QUEUE_VALUE_TYPE(A) CONCAT(QUEUEB(A), _value_t)
+#define QUEUE_SIZE(A) CONCAT(QUEUEB(A), _size)
 
-#define QUEUE_VARS(N)                                  \
-    QUEUE_VALUE_TYPE(N) QUEUE_BUF(N)[QUEUE_SIZE(N)];   \
-    u8_t QUEUE_RI(N);                                  \
-    u8_t QUEUE_WI(N);
+#define QUEUE_TYPE(T)                                  \
+    struct CONCAT(QUEUEB(T), _t) {                     \
+        QUEUE_VALUE_TYPE(T) buf[QUEUE_SIZE(T)];        \
+        u8_t read_index;                               \
+        u8_t write_index;                              \
+    }
 
-#define QUEUE_NEXT(N, V) ((V + 1) & (QUEUE_SIZE(N) - 1))
+#define QUEUE_NEXT(T, V) ((V + 1) & (QUEUE_SIZE(T) - 1))
 
-#define QUEUE_PUT(N, V)                                                 \
+#define QUEUE_PUT(T, N, V)                                              \
     do {                                                                \
-        u8_t tmp = QUEUE_NEXT(N, QUEUE_WI(N));                          \
-        if (tmp != QUEUE_RI(N)) {                                       \
-            QUEUE_BUF(N)[tmp] = V;                                      \
-            QUEUE_WI(N) = tmp;                                          \
+        u8_t tmp = QUEUE_NEXT(T, N.write_index);                        \
+        if (tmp != N.read_index) {                                      \
+            N.buf[tmp] = V;                                             \
+            N.write_index = tmp;                                        \
         }                                                               \
     } while (0)
 
-#define QUEUE_GET(N, V, B)                      \
-    do {                                        \
-        u8_t tmp = QUEUE_RI(N);                 \
-        if (QUEUE_WI(N) != tmp) {               \
-            V = QUEUE_BUF(N)[tmp];              \
-            QUEUE_RI(N) = QUEUE_NEXT(N, tmp);   \
-            B = 1;                              \
-        }                                       \
+#define QUEUE_GET(T, N, V, B)                    \
+    do {                                         \
+        u8_t tmp = N.read_index;                 \
+        if (N.write_index != tmp) {              \
+            V = N.buf[tmp];                      \
+            N.read_index = QUEUE_NEXT(T, tmp);   \
+            B = 1;                               \
+        }                                        \
     } while (0)
 
-#define QUEUE_FULL(N) (QUEUE_NEXT(N, QUEUE_WI(N)) == QUEUE_RI(N))
+#define QUEUE_FULL(T, N) (QUEUE_NEXT(T, N.write_index) == N.read_index)
 
 #endif

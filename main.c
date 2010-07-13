@@ -83,12 +83,12 @@ static void process_input_event(const struct input_event_t* e);
 static void process_input_event_pc(const struct input_event_t* e);
 static void process_input_event_tof(const struct input_event_t* e);
 static void on_channel_value(u8_t channel, u16_t width);
-static void on_channel_value_calibration(u8_t channel, u16_t width);
-static void on_channel_value_normal(u8_t channel, u16_t width);
+static void on_filtered_value(u8_t channel, u16_t width);
 
 //global variables
-QUEUE_VARS(input)
-QUEUE_VARS(channel)
+static struct input_queue_t input_queue;
+static struct channel_queue_t channel_queue[2];
+static struct filtered_queue_t filtered_queue[2];
 static struct state_t state;
 static input_event_handler_t input_event_handlers[] = {
     &process_input_event_pc,
@@ -104,7 +104,7 @@ void main(void) {
     while (1) {
         u8_t value_read = 0;
         u16_t value;
-        QUEUE_GET(input, value, value_read);
+        QUEUE_GET(input, input_queue, value, value_read);
         if (value_read) {
             struct input_event_t e;
             input_event_unpack(&e, value);
@@ -120,7 +120,7 @@ __interrupt void timer1_ovf(void);
 __interrupt void pcint(void);
 
 __interrupt void timer1_ovf(void) {
-    QUEUE_PUT(input, 1);
+    QUEUE_PUT(input, input_queue, 1);
 }
 
 __interrupt void pcint(void) {
@@ -138,7 +138,7 @@ __interrupt void pcint(void) {
     bits.bit1 = tof;
     e <<= 8;
     e |= input;
-    QUEUE_PUT(input, e);
+    QUEUE_PUT(input, input_queue, e);
 }
 
 static void process_input_event(const struct input_event_t* e) {
@@ -191,39 +191,29 @@ static void process_input_event_tof(const struct input_event_t* e) {
 static void state_init() {
     ZERO(state);
     state.calibration = is_jumper_installed();
-    state.min = 0xffff;
 }
 
 static void on_channel_value(u8_t channel, u16_t width) {
-    if (state.calibration)
-        on_channel_value_calibration(channel, width);
-    else
-        on_channel_value_normal(channel, width);
-}
-
-static void on_channel_value_calibration(u8_t channel, u16_t width) {
-    if (channel != state.calibration_channel)
+    if (!QUEUE_FULL(channel, channel_queue[channel])) {
+        state.channels[channel].width_sum += width;
+        QUEUE_PUT(channel, channel_queue[channel], width);
         return;
-    if (width == state.calibration_width) {
-        ++state.calibration_count;
-        if (state.calibration_count > 50)
-            LEDPORT = 1;
-    } else {
-        state.calibration_width = width;
-        state.calibration_count = 0;
     }
+    u16_t filtered = state.channels[channel].width_sum >> 4;
+    u8_t value_read;
+    u16_t value;
+    QUEUE_GET(channel, channel_queue[channel], value, value_read);
+    state.channels[channel].width_sum -= value;
+    state.channels[channel].width_sum += width;
+    QUEUE_PUT(channel, channel_queue[channel], width);
+    on_filtered_value(channel, filtered);
 }
 
-static void on_channel_value_normal(u8_t channel, u16_t width) {
-    if (!channel) {
-        if (QUEUE_FULL(channel)) {
-            QUEUE_RI(channel) = QUEUE_NEXT(channel, QUEUE_RI(channel));
-        }
-        QUEUE_PUT(channel, width);
-        state.min = MIN(state.min, width);
-        state.max = MAX(state.max, width);
-        /* if (width < 1164 || width > 1170) { */
-        /*     LEDPORT = 1; */
-        /* } */
+static void on_filtered_value(u8_t channel, u16_t width) {
+    if (QUEUE_FULL(filtered, filtered_queue[channel])) {
+        u8_t value_read;
+        u16_t value;
+        QUEUE_GET(filtered, filtered_queue[channel], value, value_read);
     }
+    QUEUE_PUT(filtered, filtered_queue[channel], width);
 }
