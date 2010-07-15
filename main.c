@@ -76,6 +76,7 @@ static void on_value_calibration_ch0_low(u8_t channel, u16_t width);
 static void on_value_calibration_ch1_high(u8_t channel, u16_t width);
 static void on_value_calibration_ch1_low(u8_t channel, u16_t width);
 static void calibration_store(void);
+static void calibration_load(void);
 
 //global variables
 static struct channel_queue_t channel_queue[2];
@@ -84,8 +85,13 @@ static on_value_t on_value;
 static on_value_t on_value_after_wait;
 static u8_t pinb;
 static u8_t counter;
+static u8_t calibration_mode;
+
+//eeprom
+__eeprom struct eeprom_t calibration_data;
 
 void main(void) {
+    calibration_mode = is_jumper_installed();
     setup_io();
     setup_timer1();
     setup_interrupts();
@@ -185,9 +191,14 @@ __interrupt void pcint(void) {
 }
 
 static void state_init() {
-    on_value = is_jumper_installed() ? &on_value_calibration_ch0_high : &on_value_normal;
-    channels[0].stats.min = 0xffff;
-    channels[1].stats.min = 0xffff;
+    if (calibration_mode) {
+        on_value = &on_value_calibration_ch0_high;
+        channels[0].stats.min = 0xffff;
+        channels[1].stats.min = 0xffff;
+    } else {
+        on_value = &on_value_normal;
+        calibration_load();
+    }
 }
 
 static void on_channel_value(u8_t channel, u16_t width) {
@@ -287,5 +298,18 @@ static void on_value_calibration_ch1_low(u8_t channel, u16_t width) {
 }
 
 static void calibration_store() {
-    calibration_store();
+    __disable_interrupt();
+    calibration_data.channels[0].min = channels[0].stats.min;
+    calibration_data.channels[0].max = channels[0].stats.max;
+    calibration_data.channels[1].min = channels[1].stats.min;
+    calibration_data.channels[1].max = channels[1].stats.max;
+ stop:
+    goto stop;
+}
+
+static void calibration_load() {
+    channels[0].stats.min = calibration_data.channels[0].min;
+    channels[0].stats.max = calibration_data.channels[0].max;
+    channels[1].stats.min = calibration_data.channels[1].min;
+    channels[1].stats.max = calibration_data.channels[1].max;
 }

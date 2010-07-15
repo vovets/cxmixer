@@ -47,6 +47,14 @@ struct channel_state_t {
     struct stats_t stats;
 };
 
+struct eeprom_t {
+    struct channel_t {
+        u16_t min;
+        u16_t max;
+    } channels[2];
+};
+    
+
 typedef void (*on_value_t)(u8_t channel, u16_t value);
 
 #endif
