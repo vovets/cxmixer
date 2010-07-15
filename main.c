@@ -6,14 +6,6 @@
 #include "main.h"
 #include "queue.h"
 
-void input_event_unpack(struct input_event_t* e, input_queue_value_t v) {
-    e->type = (enum input_event_type_t)v.type;
-    e->input[0] = v.ch0;
-    e->input[1] = v.ch1;
-    e->timer = v.timer;
-    e->tof = v.tof;
-}
-
 static u8_t is_jumper_installed(void) {
     u8_t old_DDRB = DDRB;
     u8_t old_PORTB = PORTB;
@@ -64,34 +56,34 @@ static void setup_io(void) {
 
 static void setup_timer1(void) {
     /* TCCR1_CS13 = 1; */
-    TCCR1_CS12 = 1;
-    /* TCCR1_CS11 = 1; */
+    /* TCCR1_CS12 = 1; */
+    TCCR1_CS11 = 1;
     TCCR1_CS10 = 1;
 }
 
 static void setup_interrupts(void) {
-    /* PCMSK |= (1<<CH0BIT); */
     PCMSK |= (1<<CH0BIT)+(1<<CH1BIT);
     GIMSK_PCIE = 1;
     TIMSK_TOIE1 = 1;
 }
 
 static void state_init(void);
-static void process_input_event(const struct input_event_t* e);
-static void process_input_event_pc(const struct input_event_t* e);
-static void process_input_event_tof(const struct input_event_t* e);
 static void on_channel_value(u8_t channel, u16_t width);
-static void on_filtered_value(u8_t channel, u16_t width);
+static void on_value_normal(u8_t channel, u16_t width);
+static void on_value_calibration_wait(u8_t channel, u16_t width);
+static void on_value_calibration_ch0_high(u8_t channel, u16_t width);
+static void on_value_calibration_ch0_low(u8_t channel, u16_t width);
+static void on_value_calibration_ch1_high(u8_t channel, u16_t width);
+static void on_value_calibration_ch1_low(u8_t channel, u16_t width);
+static void calibration_store(void);
 
 //global variables
-static struct input_queue_t input_queue;
 static struct channel_queue_t channel_queue[2];
-static struct filtered_queue_t filtered_queue[2];
-static struct state_t state;
-static input_event_handler_t input_event_handlers[] = {
-    &process_input_event_pc,
-    &process_input_event_tof
-};
+static struct channel_state_t channels[2];
+static on_value_t on_value;
+static on_value_t on_value_after_wait;
+static u8_t pinb;
+static u8_t counter;
 
 void main(void) {
     setup_io();
@@ -100,13 +92,26 @@ void main(void) {
     state_init();
     __enable_interrupt();
     while (1) {
-        u8_t value_read = 0;
-        input_queue_value_t value;
-        QUEUE_GET(input, input_queue, value, value_read);
-        if (value_read) {
-            struct input_event_t e;
-            input_event_unpack(&e, value);
-            process_input_event(&e);
+        if (channels[0].mailbox.not_empty) {
+            u8_t flag = channels[0].mailbox.flag;
+            if (!(flag & 0x01)) {
+                u16_t width = channels[0].mailbox.value;
+                if (channels[0].mailbox.flag == flag) {
+                    channels[0].mailbox.not_empty = 0;
+                    on_channel_value(0, width);
+                }
+            }
+        }
+        if (channels[1].mailbox.not_empty) {
+            u8_t flag = channels[1].mailbox.flag;
+            if (!(flag & 0x01)) {
+                u16_t width = channels[1].mailbox.value;
+                u8_t not_empty = channels[1].mailbox.not_empty;
+                if (not_empty && channels[1].mailbox.flag == flag) {
+                    channels[1].mailbox.not_empty = 0;
+                    on_channel_value(1, width);
+                }
+            }
         }
     }
 }
@@ -118,98 +123,169 @@ __interrupt void timer1_ovf(void);
 __interrupt void pcint(void);
 
 __interrupt void timer1_ovf(void) {
-    input_queue_value_t v;
-    v.type = ET_TOF;
-    QUEUE_PUT_UNSAFE(input, input_queue, v);
+    if (pinb & (1<<CH0BIT))
+        ++channels[0].input.timer_cycles;
+    if (pinb & (1<<CH1BIT))
+        ++channels[1].input.timer_cycles;
 }
 
-__interrupt void pcint(void) {
-    input_queue_value_t v;
-    v.tof = TIFR_TOV1;
-    v.timer = TCNT1;
-    v.ch0 = CH0PIN;
-    v.ch1 = CH1PIN;
-    v.type = ET_PC;
-    QUEUE_PUT_UNSAFE(input, input_queue, v);
+#pragma inline=forced
+static void pcint_rising_edge(u8_t channel, u8_t timer, u8_t tof) {
+    if (!timer || tof)
+        channels[channel].input.timer_cycles -= 1;
+    channels[channel].input.timer = timer;
 }
 
-static void process_input_event(const struct input_event_t* e) {
-    input_event_handlers[e->type](e);
-}
-
-static void on_rising_edge(u8_t channel, const struct input_event_t* e) {
-    state.channels[channel].timer = e->timer;
-    state.channels[channel].timer_cycles = (e->tof || !e->timer) ? -1 : 0;
-    state.channels[channel].input = 1;
-}
-
-static void on_fallig_edge(u8_t channel, const struct input_event_t* e) {
-    i8_t tc = state.channels[channel].timer_cycles;
-    if (e->tof || !e->timer)
+#pragma inline=forced
+static void pcint_falling_edge(u8_t channel, u8_t timer, u8_t tof) {
+    u8_t tc = channels[channel].input.timer_cycles;
+    channels[channel].input.timer_cycles = 0;
+    if (!timer || tof)
         ++tc;
     u16_t width = tc;
     width <<= 8;
-    width += e->timer;
-    width -= state.channels[channel].timer;
-    state.channels[channel].input = 0;
-    on_channel_value(channel, width);
+    width += timer;
+    width -= channels[channel].input.timer;
+    ++channels[channel].mailbox.flag;
+    channels[channel].mailbox.value = width;
+    channels[channel].mailbox.not_empty = 1;
+    ++channels[channel].mailbox.flag;
 }
 
-static void process_input_event_pc_channel(u8_t channel, const struct input_event_t* e) {
-    if (state.channels[channel].input) {
-        if (!e->input[channel])
-            on_fallig_edge(channel, e);
+#pragma inline=forced
+static void pcint_e(u8_t timer, u8_t old_pinb, u8_t new_pinb, u8_t tof) {
+    u8_t old_ch0 = old_pinb & (1<<CH0BIT);
+    u8_t old_ch1 = old_pinb & (1<<CH1BIT);
+    u8_t new_ch0 = new_pinb & (1<<CH0BIT);
+    u8_t new_ch1 = new_pinb & (1<<CH1BIT);
+    if (old_ch0) {
+        if (!new_ch0)
+            pcint_falling_edge(0, timer, tof);
     } else {
-        if (e->input[channel])
-            on_rising_edge(channel, e);
+        if (new_ch0)
+            pcint_rising_edge(0, timer, tof);
+    }
+    if (old_ch1) {
+        if (!new_ch1)
+            pcint_falling_edge(1, timer, tof);
+    } else {
+        if (new_ch1)
+            pcint_rising_edge(1, timer, tof);
     }
 }
 
-static void process_input_event_pc(const struct input_event_t* e) {
-    process_input_event_pc_channel(0, e);
-    process_input_event_pc_channel(1, e);
-}
-
-static void process_input_event_tof_channel(u8_t channel) {
-    if (state.channels[channel].input)
-        ++state.channels[channel].timer_cycles;
-}
-
-static void process_input_event_tof(const struct input_event_t* e) {
-    process_input_event_tof_channel(0);
-    process_input_event_tof_channel(1);
+__interrupt void pcint(void) {
+    u8_t tof = TIFR_TOV1;
+    u8_t timer = TCNT1;
+    u8_t new_pinb = PINB;
+    u8_t old_pinb = pinb;
+    pinb = new_pinb;
+    __enable_interrupt();
+    pcint_e(timer, old_pinb, new_pinb, tof);
 }
 
 static void state_init() {
-    ZERO(state);
-    state.calibration = is_jumper_installed();
-    state.channels[0].min = 0xffff;
-    state.channels[1].min = 0xffff;
+    on_value = is_jumper_installed() ? &on_value_calibration_ch0_high : &on_value_normal;
+    channels[0].stats.min = 0xffff;
+    channels[1].stats.min = 0xffff;
 }
 
 static void on_channel_value(u8_t channel, u16_t width) {
     if (!QUEUE_FULL(channel, channel_queue[channel])) {
-        state.channels[channel].width_sum += width;
+        channels[channel].stats.width_sum += width;
         QUEUE_PUT(channel, channel_queue[channel], width);
         return;
     }
-    u16_t filtered = (state.channels[channel].width_sum + width) / channel_queue_size;
+    u16_t filtered = (channels[channel].stats.width_sum + width) / channel_queue_size;
     u8_t value_read;
     u16_t value;
     QUEUE_GET(channel, channel_queue[channel], value, value_read);
-    state.channels[channel].min = MIN(state.channels[channel].min, value);
-    state.channels[channel].max = MAX(state.channels[channel].max, value);
-    state.channels[channel].width_sum -= value;
-    state.channels[channel].width_sum += width;
+    channels[channel].stats.width_sum -= value;
+    channels[channel].stats.width_sum += width;
     QUEUE_PUT(channel, channel_queue[channel], width);
-    on_filtered_value(channel, filtered);
+    on_value(channel, filtered);
 }
 
-static void on_filtered_value(u8_t channel, u16_t width) {
-    if (QUEUE_FULL(filtered, filtered_queue[channel])) {
-        u8_t value_read;
-        u16_t value;
-        QUEUE_GET(filtered, filtered_queue[channel], value, value_read);
+static void on_value_normal(u8_t channel, u16_t width) {
+    channels[channel].stats.min = MIN(channels[channel].stats.min, width);
+    channels[channel].stats.max = MAX(channels[channel].stats.max, width);
+    if (channels[channel].stats.max - channels[channel].stats.min > 14) {
+        LEDPORT = 1;
     }
-    QUEUE_PUT(filtered, filtered_queue[channel], width);
+}
+
+static void on_value_calibration_wait(u8_t channel, u16_t width) {
+    --counter;
+    if (!counter) {
+        on_value = on_value_after_wait;
+    }
+}
+
+static u8_t on_value_calibration_high(u8_t channel, u16_t width) {
+    if (channels[channel].stats.max < width) {
+        channels[channel].stats.max = width;
+        counter = 0;
+    } else {
+        ++counter;
+    }
+    return counter > calibration_cycles;
+}
+
+static u8_t on_value_calibration_low(u8_t channel, u16_t width) {
+    if (channels[channel].stats.min > width) {
+        channels[channel].stats.min = width;
+        counter = 0;
+    } else {
+        ++counter;
+    }
+    return counter > calibration_cycles;
+}
+
+static void on_value_calibration_ch0_high(u8_t channel, u16_t width) {
+    if (channel)
+        return;
+    if (on_value_calibration_high(0, width)) {
+        LEDPORT = 1;
+        counter = calibration_cycles;
+        on_value = &on_value_calibration_wait;
+        on_value_after_wait = &on_value_calibration_ch0_low;
+    }
+}
+
+static void on_value_calibration_ch0_low(u8_t channel, u16_t width) {
+    LEDPORT = 0;
+    if (channel)
+        return;
+    if (on_value_calibration_low(0, width)) {
+        LEDPORT = 1;
+        counter = calibration_cycles;
+        on_value = &on_value_calibration_wait;
+        on_value_after_wait = &on_value_calibration_ch1_high;
+    }
+}
+
+static void on_value_calibration_ch1_high(u8_t channel, u16_t width) {
+    LEDPORT = 0;
+    if (!channel)
+        return;
+    if (on_value_calibration_high(1, width)) {
+        LEDPORT = 1;
+        counter = calibration_cycles;
+        on_value = &on_value_calibration_wait;
+        on_value_after_wait = &on_value_calibration_ch1_low;
+    }
+}
+
+static void on_value_calibration_ch1_low(u8_t channel, u16_t width) {
+    LEDPORT = 0;
+    if (!channel)
+        return;
+    if (on_value_calibration_low(1, width)) {
+        LEDPORT = 1;
+        calibration_store();
+    }
+}
+
+static void calibration_store() {
+    calibration_store();
 }

@@ -71,7 +71,7 @@
         </option>
         <option>
           <name>SCRStackSize</name>
-          <state>16</state>
+          <state>8</state>
         </option>
         <option>
           <name>SCExtRStack</name>
