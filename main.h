@@ -5,8 +5,10 @@
 #include "queue.h"
 
 #define CH0PIN PINB_PINB2
+#define CH0PORT PORTB_PORTB0
 #define CH0BIT PINB2
 #define CH1PIN PINB_PINB3
+#define CH1PORT PORTB_PORTB1
 #define CH1BIT PINB3
 #define LEDPORT PORTB_PORTB4
 
@@ -17,7 +19,13 @@
 
 enum {
     channel_queue_size = 4,
-    calibration_cycles = 100
+    clock = 8000000,
+    timer_clock = clock / 8,
+    calibration_seconds = 1,
+    calibration_periods_count = 10,
+    calibration_period_channel = 1,
+    default_channel_value = 1500,
+    default_period_value = 20000
 };
 
 typedef u16_t channel_queue_value_t;
@@ -27,6 +35,11 @@ QUEUE_TYPE(channel);
 struct input_t {
     u8_t timer;
     i8_t timer_cycles;
+};
+
+struct output_t {
+    u16_t timer;
+    u16_t timer_left;
 };
 
 struct mailbox_t {
@@ -43,11 +56,14 @@ struct stats_t {
 
 struct channel_state_t {
     struct input_t input;
+    struct output_t output;
     struct mailbox_t mailbox;
     struct stats_t stats;
 };
 
 struct eeprom_t {
+    u8_t osccal;
+    u16_t period;
     struct channel_t {
         u16_t min;
         u16_t max;

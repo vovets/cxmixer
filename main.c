@@ -47,6 +47,8 @@ is_jumper_installed_end:
 }
 
 static void setup_io(void) {
+    DDRB_DDB0 = 1;
+    DDRB_DDB1 = 1;
     DDRB_DDB2 = 0;
     PORTB_PORTB2 = 1;
     DDRB_DDB3 = 0;
@@ -54,21 +56,28 @@ static void setup_io(void) {
     DDRB_DDB4 = 1;
 }
 
-static void setup_timer1(void) {
-    /* TCCR1_CS13 = 1; */
-    /* TCCR1_CS12 = 1; */
-    TCCR1_CS11 = 1;
-    TCCR1_CS10 = 1;
+static void enable_timer1(void) {
+    TCCR1_CS12 = 1;
+}
+
+static void enable_timer0(void) {
+    TCCR0B_CS01 = 1;
 }
 
 static void setup_interrupts(void) {
     PCMSK |= (1<<CH0BIT)+(1<<CH1BIT);
     GIMSK_PCIE = 1;
+    TIMSK_TOIE0 = 1;
     TIMSK_TOIE1 = 1;
 }
 
+static void load_osccal(void) {
+    OSCCAL = 0x6c;
+}
+
 static void state_init(void);
-static void on_channel_value(u8_t channel, u16_t width);
+static void on_raw_value(u8_t channel, u16_t width);
+static void on_period(u8_t channel, u16_t width);
 static void on_value_normal(u8_t channel, u16_t width);
 static void on_value_calibration_wait(u8_t channel, u16_t width);
 static void on_value_calibration_ch0_high(u8_t channel, u16_t width);
@@ -80,114 +89,62 @@ static void calibration_load(void);
 
 //global variables
 static struct channel_queue_t channel_queue[2];
-static struct channel_state_t channels[2];
+static struct channel_state_t channels[4];
 static on_value_t on_value;
 static on_value_t on_value_after_wait;
 static u8_t pinb;
-static u8_t counter;
+static u16_t counter;
 static u8_t calibration_mode;
+static u16_t period;
+static u16_t period_timer_left;
+static u16_t frq;
+static volatile u8_t reload;
+static u8_t output_stage;
+static u8_t output_enabled;
 
 //eeprom
 __eeprom struct eeprom_t calibration_data;
 
 void main(void) {
+    load_osccal();
     calibration_mode = is_jumper_installed();
     setup_io();
-    setup_timer1();
+    enable_timer1();
+    enable_timer0();
     setup_interrupts();
     state_init();
     __enable_interrupt();
     while (1) {
-        if (channels[0].mailbox.not_empty) {
-            u8_t flag = channels[0].mailbox.flag;
-            if (!(flag & 0x01)) {
-                u16_t width = channels[0].mailbox.value;
-                if (channels[0].mailbox.flag == flag) {
-                    channels[0].mailbox.not_empty = 0;
-                    on_channel_value(0, width);
+        u8_t channel;
+        if (period) {
+            for (channel = 0; channel < 2; ++channel) {
+                if (channels[channel].mailbox.not_empty) {
+                    u8_t flag = channels[channel].mailbox.flag;
+                    if (!(flag & 0x01)) {
+                        u16_t width = channels[channel].mailbox.value;
+                        if (channels[channel].mailbox.flag == flag) {
+                            channels[channel].mailbox.not_empty = 0;
+                            on_raw_value(channel, width);
+                        }
+                    }
+                }
+            }
+        } else {
+            for (channel = 2; channel < 4; ++channel) {
+                if (channels[channel].mailbox.not_empty) {
+                    u8_t flag = channels[channel].mailbox.flag;
+                    if (!(flag & 0x01)) {
+                        u16_t period = channels[channel].mailbox.value;
+                        u8_t not_empty = channels[channel].mailbox.not_empty;
+                        if (not_empty && channels[channel].mailbox.flag == flag) {
+                            channels[channel].mailbox.not_empty = 0;
+                            on_period(channel, period);
+                        }
+                    }
                 }
             }
         }
-        if (channels[1].mailbox.not_empty) {
-            u8_t flag = channels[1].mailbox.flag;
-            if (!(flag & 0x01)) {
-                u16_t width = channels[1].mailbox.value;
-                u8_t not_empty = channels[1].mailbox.not_empty;
-                if (not_empty && channels[1].mailbox.flag == flag) {
-                    channels[1].mailbox.not_empty = 0;
-                    on_channel_value(1, width);
-                }
-            }
-        }
     }
-}
-
-#pragma vector=TIM1_OVF_vect
-__interrupt void timer1_ovf(void);
-
-#pragma vector=PCINT0_vect
-__interrupt void pcint(void);
-
-__interrupt void timer1_ovf(void) {
-    if (pinb & (1<<CH0BIT))
-        ++channels[0].input.timer_cycles;
-    if (pinb & (1<<CH1BIT))
-        ++channels[1].input.timer_cycles;
-}
-
-#pragma inline=forced
-static void pcint_rising_edge(u8_t channel, u8_t timer, u8_t tof) {
-    if (!timer || tof)
-        channels[channel].input.timer_cycles -= 1;
-    channels[channel].input.timer = timer;
-}
-
-#pragma inline=forced
-static void pcint_falling_edge(u8_t channel, u8_t timer, u8_t tof) {
-    u8_t tc = channels[channel].input.timer_cycles;
-    channels[channel].input.timer_cycles = 0;
-    if (!timer || tof)
-        ++tc;
-    u16_t width = tc;
-    width <<= 8;
-    width += timer;
-    width -= channels[channel].input.timer;
-    ++channels[channel].mailbox.flag;
-    channels[channel].mailbox.value = width;
-    channels[channel].mailbox.not_empty = 1;
-    ++channels[channel].mailbox.flag;
-}
-
-#pragma inline=forced
-static void pcint_e(u8_t timer, u8_t old_pinb, u8_t new_pinb, u8_t tof) {
-    u8_t old_ch0 = old_pinb & (1<<CH0BIT);
-    u8_t old_ch1 = old_pinb & (1<<CH1BIT);
-    u8_t new_ch0 = new_pinb & (1<<CH0BIT);
-    u8_t new_ch1 = new_pinb & (1<<CH1BIT);
-    if (old_ch0) {
-        if (!new_ch0)
-            pcint_falling_edge(0, timer, tof);
-    } else {
-        if (new_ch0)
-            pcint_rising_edge(0, timer, tof);
-    }
-    if (old_ch1) {
-        if (!new_ch1)
-            pcint_falling_edge(1, timer, tof);
-    } else {
-        if (new_ch1)
-            pcint_rising_edge(1, timer, tof);
-    }
-}
-
-__interrupt void pcint(void) {
-    u8_t tof = TIFR_TOV1;
-    u8_t timer = TCNT1;
-    u8_t new_pinb = PINB;
-    u8_t old_pinb = pinb;
-    pinb = new_pinb;
-    __enable_interrupt();
-    pcint_e(timer, old_pinb, new_pinb, tof);
 }
 
 static void state_init() {
@@ -195,13 +152,19 @@ static void state_init() {
         on_value = &on_value_calibration_ch0_high;
         channels[0].stats.min = 0xffff;
         channels[1].stats.min = 0xffff;
+        channels[2].stats.min = 0xffff;
+        channels[3].stats.min = 0xffff;
     } else {
+        channels[0].output.timer = default_channel_value;
+        channels[0].output.timer_left = default_channel_value;
+        channels[1].output.timer = default_channel_value;
+        channels[1].output.timer_left = default_channel_value;
         on_value = &on_value_normal;
         calibration_load();
     }
 }
 
-static void on_channel_value(u8_t channel, u16_t width) {
+static void on_raw_value(u8_t channel, u16_t width) {
     if (!QUEUE_FULL(channel, channel_queue[channel])) {
         channels[channel].stats.width_sum += width;
         QUEUE_PUT(channel, channel_queue[channel], width);
@@ -214,19 +177,46 @@ static void on_channel_value(u8_t channel, u16_t width) {
     channels[channel].stats.width_sum -= value;
     channels[channel].stats.width_sum += width;
     QUEUE_PUT(channel, channel_queue[channel], width);
+    if ((channel == calibration_period_channel) && counter)
+        --counter;
     on_value(channel, filtered);
 }
 
-static void on_value_normal(u8_t channel, u16_t width) {
-    channels[channel].stats.min = MIN(channels[channel].stats.min, width);
-    channels[channel].stats.max = MAX(channels[channel].stats.max, width);
-    if (channels[channel].stats.max - channels[channel].stats.min > 14) {
-        LEDPORT = 1;
+static void on_period(u8_t channel, u16_t width) {
+    if (!channels[channel].stats.max) {
+        channels[channel].stats.max = 1;
+        return;
+    }
+    if (MIN(channels[2].stats.max, channels[3].stats.max) < calibration_periods_count) {
+        channels[channel].stats.min = MIN(channels[channel].stats.min, width);
+        ++channels[channel].stats.max;
+    } else {
+        period = MIN(channels[2].stats.min, channels[3].stats.min);
+        frq = timer_clock / period;
     }
 }
 
+static void on_value_normal(u8_t channel, u16_t width) {
+    u16_t ch0 = channels[0].output.timer;
+    u16_t ch1 = channels[1].output.timer;
+    if (channel)
+        ch1 = width;
+    else
+        ch0 = width;
+    while (reload)
+        ;
+    output_enabled = 1;
+    __disable_interrupt();
+    if (reload) {
+        __enable_interrupt();
+        return;
+    }
+    channels[0].output.timer = ch0;
+    channels[1].output.timer = ch1;
+    __enable_interrupt();
+}
+
 static void on_value_calibration_wait(u8_t channel, u16_t width) {
-    --counter;
     if (!counter) {
         on_value = on_value_after_wait;
     }
@@ -235,21 +225,17 @@ static void on_value_calibration_wait(u8_t channel, u16_t width) {
 static u8_t on_value_calibration_high(u8_t channel, u16_t width) {
     if (channels[channel].stats.max < width) {
         channels[channel].stats.max = width;
-        counter = 0;
-    } else {
-        ++counter;
+        counter = frq * calibration_seconds;
     }
-    return counter > calibration_cycles;
+    return !counter;
 }
 
 static u8_t on_value_calibration_low(u8_t channel, u16_t width) {
     if (channels[channel].stats.min > width) {
         channels[channel].stats.min = width;
-        counter = 0;
-    } else {
-        ++counter;
+        counter = frq * calibration_seconds;
     }
-    return counter > calibration_cycles;
+    return !counter;
 }
 
 static void on_value_calibration_ch0_high(u8_t channel, u16_t width) {
@@ -257,7 +243,7 @@ static void on_value_calibration_ch0_high(u8_t channel, u16_t width) {
         return;
     if (on_value_calibration_high(0, width)) {
         LEDPORT = 1;
-        counter = calibration_cycles;
+        counter = frq * calibration_seconds;
         on_value = &on_value_calibration_wait;
         on_value_after_wait = &on_value_calibration_ch0_low;
     }
@@ -269,7 +255,7 @@ static void on_value_calibration_ch0_low(u8_t channel, u16_t width) {
         return;
     if (on_value_calibration_low(0, width)) {
         LEDPORT = 1;
-        counter = calibration_cycles;
+        counter = frq * calibration_seconds;
         on_value = &on_value_calibration_wait;
         on_value_after_wait = &on_value_calibration_ch1_high;
     }
@@ -281,7 +267,7 @@ static void on_value_calibration_ch1_high(u8_t channel, u16_t width) {
         return;
     if (on_value_calibration_high(1, width)) {
         LEDPORT = 1;
-        counter = calibration_cycles;
+        counter = frq * calibration_seconds;
         on_value = &on_value_calibration_wait;
         on_value_after_wait = &on_value_calibration_ch1_low;
     }
@@ -292,24 +278,210 @@ static void on_value_calibration_ch1_low(u8_t channel, u16_t width) {
     if (!channel)
         return;
     if (on_value_calibration_low(1, width)) {
-        LEDPORT = 1;
         calibration_store();
     }
 }
 
+#pragma optimize=s none
 static void calibration_store() {
-    __disable_interrupt();
+    calibration_data.period = period;
     calibration_data.channels[0].min = channels[0].stats.min;
     calibration_data.channels[0].max = channels[0].stats.max;
     calibration_data.channels[1].min = channels[1].stats.min;
     calibration_data.channels[1].max = channels[1].stats.max;
+    LEDPORT = 1;
  stop:
     goto stop;
 }
 
 static void calibration_load() {
-    channels[0].stats.min = calibration_data.channels[0].min;
-    channels[0].stats.max = calibration_data.channels[0].max;
-    channels[1].stats.min = calibration_data.channels[1].min;
-    channels[1].stats.max = calibration_data.channels[1].max;
+    /* period = calibration_data.period; */
+    /* channels[0].stats.min = calibration_data.channels[0].min; */
+    /* channels[0].stats.max = calibration_data.channels[0].max; */
+    /* channels[1].stats.min = calibration_data.channels[1].min; */
+    /* channels[1].stats.max = calibration_data.channels[1].max; */
+    period = 15972;
+    channels[0].stats.min = 1102;
+    channels[0].stats.max = 1923;
+    channels[1].stats.min = 1096;
+    channels[1].stats.max = 1926;
+}
+
+#pragma vector=TIM1_OVF_vect
+__interrupt void timer1_ovf(void);
+
+#pragma vector=PCINT0_vect
+__interrupt void pcint(void);
+
+#pragma vector=TIM0_OVF_vect
+__interrupt void timer0_ovf(void);
+
+#pragma vector=TIM0_COMPA_vect
+__interrupt void timer0_compa(void);
+
+/* #pragma vector=TIM0_COMPB_vect */
+/* __interrupt void timer0_compb(void); */
+
+__interrupt void timer1_ovf(void) {
+    if (pinb & (1<<CH0BIT))
+        ++channels[0].input.timer_cycles;
+    if (pinb & (1<<CH1BIT))
+        ++channels[1].input.timer_cycles;
+    ++channels[2].input.timer_cycles;
+    ++channels[3].input.timer_cycles;
+}
+
+__interrupt void timer0_ovf(void) {
+    enum { tcnt_bias = 3 };
+    period_timer_left -= 256;
+    switch (output_stage) {
+    case 0: {
+        channels[0].output.timer_left -= 256;
+        u8_t tcnt = TCNT0;
+        if ((channels[0].output.timer_left >= tcnt)
+            && (channels[0].output.timer_left < (256 + tcnt))
+            ) {
+            u8_t ocr;
+            TCCR0A_COM0A1 = 1;
+            TCCR0A_COM0A0 = 0;
+            if (output_enabled) {
+                TCCR0A_COM0B1 = 1;
+                TCCR0A_COM0B0 = 1;
+            }
+            if (channels[0].output.timer_left >= 256)
+                ocr = channels[0].output.timer_left - 256;
+            else {
+                tcnt = TCNT0 + tcnt_bias;
+                ocr = channels[0].output.timer_left = MAX(channels[0].output.timer_left, tcnt);
+            }
+            OCR0A = ocr;
+            OCR0B = ocr;
+            ++output_stage;
+        }
+    }
+        break;
+
+    case 1: {
+        channels[1].output.timer_left -= 256;
+        u8_t tcnt = TCNT0;
+        if ((channels[1].output.timer_left >= tcnt)
+            && (channels[1].output.timer_left < (256 + tcnt))
+            ) {
+            u8_t ocr;
+            TCCR0A_COM0B1 = 1;
+            TCCR0A_COM0B0 = 0;
+            if (channels[1].output.timer_left >= 256)
+                ocr = channels[1].output.timer_left - 256;
+            else {
+                tcnt = TCNT0 + tcnt_bias;
+                ocr = channels[1].output.timer_left = MAX(channels[1].output.timer_left, tcnt);
+            }
+            OCR0B = ocr;
+            ++output_stage;
+        }
+    }
+        break;
+
+    case 2: {
+        u8_t tcnt = TCNT0;
+        if ((period_timer_left >= tcnt)
+            && (period_timer_left < (256 + tcnt))
+            ) {
+            u8_t ocr;
+            if (output_enabled) {
+                TCCR0A_COM0A1 = 1;
+                TCCR0A_COM0A0 = 1;
+            }
+            TIMSK_OCIE0A = 1;
+            if (period_timer_left >= 256)
+                ocr = period_timer_left - 256;
+            else {
+                tcnt = TCNT0 + tcnt_bias;
+                ocr = period_timer_left = MAX(period_timer_left, tcnt);
+            }
+            OCR0A = ocr;
+            reload = 1;
+            output_stage = 0;
+        }
+    }
+        break;
+    }
+}
+
+__interrupt void timer0_compa(void) {
+    TCNT0 = 0;
+    TIMSK_OCIE0A = 0;
+    period_timer_left = period;
+    channels[0].output.timer_left = channels[0].output.timer;
+    channels[1].output.timer_left = channels[1].output.timer;
+    reload = 0;
+}
+
+#pragma inline=forced
+    static void pcint_rising_edge(u8_t channel, u8_t timer, u8_t tof) {
+        if (!timer || tof)
+            channels[channel].input.timer_cycles -= 1;
+        channels[channel].input.timer = timer;
+    }
+
+#pragma inline=forced
+    static void pcint_rising_edge_period(u8_t channel, u8_t timer, u8_t tof) {
+        u8_t tc = channels[channel].input.timer_cycles;
+        channels[channel].input.timer_cycles = (!timer || tof) ? -1 : 0;
+        if (!timer || tof)
+            ++tc;
+        u16_t width = tc;
+        width <<= 8;
+        width += timer;
+        width -= channels[channel].input.timer;
+        channels[channel].input.timer = timer;
+        ++channels[channel].mailbox.flag;
+        channels[channel].mailbox.value = width;
+        channels[channel].mailbox.not_empty = 1;
+        ++channels[channel].mailbox.flag;
+    }
+
+#pragma inline=forced
+    static void pcint_falling_edge(u8_t channel, u8_t timer, u8_t tof) {
+        u8_t tc = channels[channel].input.timer_cycles;
+        channels[channel].input.timer_cycles = 0;
+        if (!timer || tof)
+            ++tc;
+        u16_t width = tc;
+        width <<= 8;
+        width += timer;
+        width -= channels[channel].input.timer;
+        ++channels[channel].mailbox.flag;
+        channels[channel].mailbox.value = width;
+        channels[channel].mailbox.not_empty = 1;
+        ++channels[channel].mailbox.flag;
+    }
+
+__interrupt void pcint(void) {
+    u8_t tof = TIFR_TOV1;
+    u8_t timer = TCNT1;
+    u8_t new_pinb = PINB;
+    u8_t old_ch0 = pinb & (1<<CH0BIT);
+    u8_t old_ch1 = pinb & (1<<CH1BIT);
+    u8_t new_ch0 = new_pinb & (1<<CH0BIT);
+    u8_t new_ch1 = new_pinb & (1<<CH1BIT);
+    pinb = new_pinb;
+    if (old_ch0) {
+        if (!new_ch0)
+            pcint_falling_edge(0, timer, tof);
+    } else {
+        if (new_ch0) {
+            pcint_rising_edge(0, timer, tof);
+            pcint_rising_edge_period(2, timer, tof);
+        }
+    }
+    if (old_ch1) {
+        if (!new_ch1)
+            pcint_falling_edge(1, timer, tof);
+    } else {
+        if (new_ch1) {
+            pcint_rising_edge(1, timer, tof);
+            pcint_rising_edge_period(3, timer, tof);
+        }
+    }
 }
