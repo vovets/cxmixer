@@ -1675,12 +1675,12 @@
         </option>
         <option>
           <name>OutputFile</name>
-          <state>mixer.a90</state>
+          <state>mixer.dbg</state>
         </option>
         <option>
           <name>OutputFormat</name>
           <version>11</version>
-          <state>22</state>
+          <state>66</state>
         </option>
         <option>
           <name>FormatVariant</name>
@@ -1813,11 +1813,12 @@
         </option>
         <option>
           <name>XExtraOptionsCheck</name>
-          <state>0</state>
+          <state>1</state>
         </option>
         <option>
           <name>XExtraOptions</name>
-          <state></state>
+          <state>-Ointel-standard,(CODE)=.code.hex </state>
+          <state>-Ointel-standard,(XDATA)=.eeprom.hex </state>
         </option>
         <option>
           <name>IncludeSuppressed</name>
