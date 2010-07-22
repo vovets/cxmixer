@@ -66,9 +66,9 @@ static void enable_timer0(void) {
 
 static void setup_interrupts(void) {
     PCMSK |= (1<<CH0BIT)+(1<<CH1BIT);
-    GIMSK_PCIE = 1;
+    /* GIMSK_PCIE = 1; */
     TIMSK_TOIE0 = 1;
-    TIMSK_TOIE1 = 1;
+    /* TIMSK_TOIE1 = 1; */
 }
 
 static void load_osccal(void) {
@@ -96,11 +96,20 @@ static u8_t pinb;
 static u16_t counter;
 static u8_t calibration_mode;
 static u16_t period;
-static u16_t period_timer_left;
+static u16_t period_current;
 static u16_t frq;
-static volatile u8_t reload;
 static u8_t output_stage;
-static u8_t output_enabled;
+static u8_t output_enabled = 1;
+static union {
+    u16_t v;
+    struct {
+        u8_t low;
+        u8_t high;
+    } b;
+} output_width_u;
+static u8_t input_in_sync;
+static i8_t delta = 1;
+static u16_t input_timer;
 
 //eeprom
 __eeprom struct eeprom_t calibration_data;
@@ -155,31 +164,30 @@ static void state_init() {
         channels[2].stats.min = 0xffff;
         channels[3].stats.min = 0xffff;
     } else {
-        channels[0].output.timer = default_channel_value;
-        channels[0].output.timer_left = default_channel_value;
-        channels[1].output.timer = default_channel_value;
-        channels[1].output.timer_left = default_channel_value;
-        on_value = &on_value_normal;
         calibration_load();
+        channels[0].output.width = channels[0].stats.min;
+        channels[1].output.width = channels[1].stats.min;
+        on_value = &on_value_normal;
     }
 }
 
 static void on_raw_value(u8_t channel, u16_t width) {
-    if (!QUEUE_FULL(channel, channel_queue[channel])) {
-        channels[channel].stats.width_sum += width;
-        QUEUE_PUT(channel, channel_queue[channel], width);
-        return;
-    }
-    u16_t filtered = (channels[channel].stats.width_sum + width) / channel_queue_size;
-    u8_t value_read;
-    u16_t value;
-    QUEUE_GET(channel, channel_queue[channel], value, value_read);
-    channels[channel].stats.width_sum -= value;
-    channels[channel].stats.width_sum += width;
-    QUEUE_PUT(channel, channel_queue[channel], width);
-    if ((channel == calibration_period_channel) && counter)
-        --counter;
-    on_value(channel, filtered);
+    /* if (!QUEUE_FULL(channel, channel_queue[channel])) { */
+    /*     channels[channel].stats.width_sum += width; */
+    /*     QUEUE_PUT(channel, channel_queue[channel], width); */
+    /*     return; */
+    /* } */
+    /* u16_t filtered = (channels[channel].stats.width_sum + width) / channel_queue_size; */
+    /* u8_t value_read; */
+    /* u16_t value; */
+    /* QUEUE_GET(channel, channel_queue[channel], value, value_read); */
+    /* channels[channel].stats.width_sum -= value; */
+    /* channels[channel].stats.width_sum += width; */
+    /* QUEUE_PUT(channel, channel_queue[channel], width); */
+    /* if ((channel == calibration_period_channel) && counter) */
+    /*     --counter; */
+    /* on_value(channel, filtered); */
+    on_value(channel, width);
 }
 
 static void on_period(u8_t channel, u16_t width) {
@@ -197,23 +205,25 @@ static void on_period(u8_t channel, u16_t width) {
 }
 
 static void on_value_normal(u8_t channel, u16_t width) {
-    u16_t ch0 = channels[0].output.timer;
-    u16_t ch1 = channels[1].output.timer;
-    if (channel)
-        ch1 = width;
-    else
-        ch0 = width;
-    while (reload)
-        ;
-    output_enabled = 1;
+    /* u16_t ch0 = channels[0].output.width; */
+    /* if (channel) { */
+    /*     ch0 += delta; */
+    /*     if((delta > 0 && ch0 >= channels[0].stats.max) */
+    /*        || (delta < 0 && ch0 <= channels[0].stats.min)) { */
+    /*         delta = -delta; */
+    /*     } */
+    /*     if (ch0 > channels[0].stats.max) */
+    /*         ch0 = channels[0].stats.max; */
+    /*     if (ch0 < channels[0].stats.min) */
+    /*         ch0 = channels[0].stats.min; */
+    /* } */
+    u16_t ch0 = channels[0].output.width;
+    u16_t ch1 = channels[1].output.width;
     __disable_interrupt();
-    if (reload) {
-        __enable_interrupt();
-        return;
-    }
-    channels[0].output.timer = ch0;
-    channels[1].output.timer = ch1;
+    channels[0].output.width = ch0;
+    channels[1].output.width = ch1;
     __enable_interrupt();
+    output_enabled = 1;
 }
 
 static void on_value_calibration_wait(u8_t channel, u16_t width) {
@@ -307,6 +317,8 @@ static void calibration_load() {
     channels[1].stats.max = 1926;
 }
 
+/* interrupt handlers */
+
 #pragma vector=TIM1_OVF_vect
 __interrupt void timer1_ovf(void);
 
@@ -319,169 +331,118 @@ __interrupt void timer0_ovf(void);
 #pragma vector=TIM0_COMPA_vect
 __interrupt void timer0_compa(void);
 
-/* #pragma vector=TIM0_COMPB_vect */
-/* __interrupt void timer0_compb(void); */
-
 __interrupt void timer1_ovf(void) {
-    if (pinb & (1<<CH0BIT))
-        ++channels[0].input.timer_cycles;
-    if (pinb & (1<<CH1BIT))
-        ++channels[1].input.timer_cycles;
-    ++channels[2].input.timer_cycles;
-    ++channels[3].input.timer_cycles;
+    input_timer += 256;
 }
 
 __interrupt void timer0_ovf(void) {
-    enum { tcnt_bias = 3 };
-    period_timer_left -= 256;
-    switch (output_stage) {
-    case 0: {
-        channels[0].output.timer_left -= 256;
-        u8_t tcnt = TCNT0;
-        if ((channels[0].output.timer_left >= tcnt)
-            && (channels[0].output.timer_left < (256 + tcnt))
-            ) {
-            u8_t ocr;
+    --output_width_u.b.high;
+    if (!output_width_u.b.high) {
+        switch (output_stage) {
+        case 0:
             TCCR0A_COM0A1 = 1;
             TCCR0A_COM0A0 = 0;
             if (output_enabled) {
                 TCCR0A_COM0B1 = 1;
                 TCCR0A_COM0B0 = 1;
             }
-            if (channels[0].output.timer_left >= 256)
-                ocr = channels[0].output.timer_left - 256;
-            else {
-                tcnt = TCNT0 + tcnt_bias;
-                ocr = channels[0].output.timer_left = MAX(channels[0].output.timer_left, tcnt);
-            }
-            OCR0A = ocr;
-            OCR0B = ocr;
-            ++output_stage;
-        }
-    }
-        break;
-
-    case 1: {
-        channels[1].output.timer_left -= 256;
-        u8_t tcnt = TCNT0;
-        if ((channels[1].output.timer_left >= tcnt)
-            && (channels[1].output.timer_left < (256 + tcnt))
-            ) {
-            u8_t ocr;
+            output_stage = 1;
+            break;
+        case 1:
             TCCR0A_COM0B1 = 1;
             TCCR0A_COM0B0 = 0;
-            if (channels[1].output.timer_left >= 256)
-                ocr = channels[1].output.timer_left - 256;
-            else {
-                tcnt = TCNT0 + tcnt_bias;
-                ocr = channels[1].output.timer_left = MAX(channels[1].output.timer_left, tcnt);
-            }
-            OCR0B = ocr;
-            ++output_stage;
-        }
-    }
-        break;
-
-    case 2: {
-        u8_t tcnt = TCNT0;
-        if ((period_timer_left >= tcnt)
-            && (period_timer_left < (256 + tcnt))
-            ) {
-            u8_t ocr;
+            output_stage = 2;
+            break;
+        case 2:
             if (output_enabled) {
                 TCCR0A_COM0A1 = 1;
                 TCCR0A_COM0A0 = 1;
             }
-            TIMSK_OCIE0A = 1;
-            if (period_timer_left >= 256)
-                ocr = period_timer_left - 256;
-            else {
-                tcnt = TCNT0 + tcnt_bias;
-                ocr = period_timer_left = MAX(period_timer_left, tcnt);
-            }
-            OCR0A = ocr;
-            reload = 1;
             output_stage = 0;
+            break;
         }
+        OCR0A = OCR0B = output_width_u.b.low;
+        TIMSK_OCIE0A = 1;
     }
-        break;
+}
+
+#pragma inline=forced
+u8_t adjust_output_width(void) {
+    enum { tmin = 50 };
+    u8_t tcnt = 0;
+    if (output_width_u.b.low < tmin) {
+        tcnt = tmin - output_width_u.b.low;
+        output_width_u.b.low = tmin;
+        /* --output_width_u.b.high; */
     }
+    return tcnt;
 }
 
 __interrupt void timer0_compa(void) {
-    TCNT0 = 0;
     TIMSK_OCIE0A = 0;
-    period_timer_left = period;
-    channels[0].output.timer_left = channels[0].output.timer;
-    channels[1].output.timer_left = channels[1].output.timer;
-    reload = 0;
+    switch (output_stage) {
+    case 0:
+        period_current = period - channels[0].output.width - channels[1].output.width;
+        channels[0].output.width_current = channels[0].output.width;
+        channels[1].output.width_current = channels[1].output.width;
+        output_width_u.v = channels[0].output.width_current;
+        break;
+    case 1:
+        output_width_u.v = channels[1].output.width_current;
+        break;
+    case 2:
+        output_width_u.v = period_current;
+        break;
+    }
+    TCNT0 = adjust_output_width();
 }
-
-#pragma inline=forced
-    static void pcint_rising_edge(u8_t channel, u8_t timer, u8_t tof) {
-        if (!timer || tof)
-            channels[channel].input.timer_cycles -= 1;
-        channels[channel].input.timer = timer;
-    }
-
-#pragma inline=forced
-    static void pcint_rising_edge_period(u8_t channel, u8_t timer, u8_t tof) {
-        u8_t tc = channels[channel].input.timer_cycles;
-        channels[channel].input.timer_cycles = (!timer || tof) ? -1 : 0;
-        if (!timer || tof)
-            ++tc;
-        u16_t width = tc;
-        width <<= 8;
-        width += timer;
-        width -= channels[channel].input.timer;
-        channels[channel].input.timer = timer;
-        ++channels[channel].mailbox.flag;
-        channels[channel].mailbox.value = width;
-        channels[channel].mailbox.not_empty = 1;
-        ++channels[channel].mailbox.flag;
-    }
-
-#pragma inline=forced
-    static void pcint_falling_edge(u8_t channel, u8_t timer, u8_t tof) {
-        u8_t tc = channels[channel].input.timer_cycles;
-        channels[channel].input.timer_cycles = 0;
-        if (!timer || tof)
-            ++tc;
-        u16_t width = tc;
-        width <<= 8;
-        width += timer;
-        width -= channels[channel].input.timer;
-        ++channels[channel].mailbox.flag;
-        channels[channel].mailbox.value = width;
-        channels[channel].mailbox.not_empty = 1;
-        ++channels[channel].mailbox.flag;
-    }
 
 __interrupt void pcint(void) {
     u8_t tof = TIFR_TOV1;
     u8_t timer = TCNT1;
+    if (tof) {
+        input_timer += 256;
+        TIFR_TOV1 = 1;
+    }
+    input_timer += timer;
     u8_t new_pinb = PINB;
-    u8_t old_ch0 = pinb & (1<<CH0BIT);
-    u8_t old_ch1 = pinb & (1<<CH1BIT);
-    u8_t new_ch0 = new_pinb & (1<<CH0BIT);
-    u8_t new_ch1 = new_pinb & (1<<CH1BIT);
+    u8_t old_pinb = pinb;
     pinb = new_pinb;
-    if (old_ch0) {
-        if (!new_ch0)
-            pcint_falling_edge(0, timer, tof);
+    if (old_pinb & (1<<CH0BIT)) {
+        /* was high */
+        if (!(new_pinb & (1<<CH0BIT))) {
+            /* falling edge */
+            ++channels[0].mailbox.flag;
+            channels[0].mailbox.value = input_timer;
+            channels[0].mailbox.not_empty = 1;
+            ++channels[0].mailbox.flag;
+        }
     } else {
-        if (new_ch0) {
-            pcint_rising_edge(0, timer, tof);
-            pcint_rising_edge_period(2, timer, tof);
+        if (new_pinb & (1<<CH0BIT)) {
+            /* rising edge */
+            TCNT1 = 0;
+            input_timer = 0;
+            input_in_sync = 1;
         }
     }
-    if (old_ch1) {
-        if (!new_ch1)
-            pcint_falling_edge(1, timer, tof);
+
+    if (old_pinb & (1<<CH1BIT)) {
+        /* was high */
+        if (!(new_pinb & (1<<CH1BIT))) {
+            /* falling edge */
+            if (!input_in_sync)
+                return;
+            u16_t width = input_timer - channels[1].input.timer;
+            ++channels[1].mailbox.flag;
+            channels[1].mailbox.value = width;
+            channels[1].mailbox.not_empty = 1;
+            ++channels[1].mailbox.flag;
+        }
     } else {
-        if (new_ch1) {
-            pcint_rising_edge(1, timer, tof);
-            pcint_rising_edge_period(3, timer, tof);
+        if (new_pinb & (1<<CH1BIT)) {
+            /* rising edge */
+            channels[1].input.timer = input_timer;
         }
     }
+
 }

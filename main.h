@@ -18,7 +18,7 @@
 #define MAX(A, B) ((A) > (B) ? (A) : (B))
 
 enum {
-    channel_queue_size = 4,
+    channel_queue_size = 8,
     clock = 8000000,
     timer_clock = clock / 8,
     calibration_seconds = 1,
@@ -33,13 +33,12 @@ typedef u16_t channel_queue_value_t;
 QUEUE_TYPE(channel);
 
 struct input_t {
-    u8_t timer;
-    i8_t timer_cycles;
+    u16_t timer;
 };
 
 struct output_t {
-    u16_t timer;
-    u16_t timer_left;
+    u16_t width;
+    u16_t width_current;
 };
 
 struct mailbox_t {
