@@ -56,24 +56,9 @@ static void setup_io(void) {
     DDRB_DDB4 = 1;
 }
 
-static void load_osccal(void) {
-    OSCCAL = 0x6c;
-}
-
-static void state_init(void);
-static void calibration_store(void);
-static void calibration_load(void);
-
 //global variables
-static struct channel_queue_t channel_queue[2];
 static u8_t pinb;
-static u16_t counter;
-static u8_t calibration_mode;
-static u16_t period_current;
-static u16_t frq;
 static volatile u8_t output_completed;
-static volatile u8_t frame_captured;
-static u8_t output_enabled = 1;
 static union {
     u16_t v;
     struct {
@@ -81,7 +66,8 @@ static union {
         u8_t h;
     } b;
 } frame[4];
-u8_t input_timer_high;
+static volatile u8_t frame_bits;
+u8_t timer1_hi;
 static union {
     u16_t v;
     struct {
@@ -89,64 +75,156 @@ static union {
         u8_t h;
     } b;
 } output_timer;
-static i8_t delta = 1;
-static volatile u16_t ch0 = 1500;
-static u16_t ch1 = 1500;
-static u16_t period = 20000;
-static u8_t frame_bits;
+static u16_t channels[2] = { default_channel_value, default_channel_value };
+struct calibration_data_t calibration_data;
 
-__eeprom struct eeprom_t calibration_data;
+__eeprom struct calibration_data_t calibration_data_eeprom;
+__eeprom u8_t eeprom_checksum;
 
+static void calibration_store(void);
+static u8_t calibration_load(void);
+static void calibrate(void);
 static void capture_frame(void);
 static void calculate_channels(void);
 static void produce_output(void);
-static void wait(u16_t width);
 static void setup_timer0(void);
 static void wait_for_output_comletion(void);
 static void produce_pulse(u8_t ch, u16_t width);
+static void set_timer0_clock(enum timer0_clock_t c);
 static void start_timer0(void);
 static void stop_timer0(void);
+static void set_timer1_clock(enum timer1_clock_t c);
 static void start_timer1(void);
 static void stop_timer1(void);
 
-#pragma optimize=s none
 void main(void) {
-    load_osccal();
+    u8_t calibration = is_jumper_installed();
     setup_io();
     __enable_interrupt();
-    while(1) {
+    if (calibration) {
+        calibrate();
+        calibration_store();
+        LEDPORT = 1;
+    } else {
+        if (calibration_load()) {
+            while(1) {
+                capture_frame();
+                calculate_channels();
+                produce_output();
+            }
+        }
+        LEDPORT = 1;
+    }
+}
+
+static u8_t calculate_checksum(void) {
+    u8_t checksum = checksum_seed;
+    for (u8_t* byte = (u8_t*)&calibration_data;
+         byte < (u8_t*)&calibration_data + sizeof(calibration_data);
+         ++byte) {
+        checksum += *byte;
+    }
+    return checksum;
+}
+
+static void calibration_store(void) {
+    calibration_data_eeprom = calibration_data;
+    eeprom_checksum = calculate_checksum();
+}
+
+static u8_t calibration_load(void) {
+    calibration_data = calibration_data_eeprom;
+    if (calculate_checksum() != eeprom_checksum)
+        return 0;
+    return 1;
+}
+
+#pragma optimize=s none
+void calibrate(void) {
+    calibration_data.channels[0].min = 0xffff;
+    calibration_data.channels[1].min = 0xffff;
+
+    capture_frame();
+    LEDPORT = 1;
+    for (u16_t i = 0; i < calibration_periods; ++i) {
         capture_frame();
         calculate_channels();
-        produce_output();
-        /* ch0 += delta; */
-        /* if (ch0 < 1000 || ch0 > 2000) */
-        /*     delta = -delta; */
+        for (u8_t ch = 0; ch < 2; ++ch) {
+            if (channels[ch] > calibration_data.channels[ch].max)
+                calibration_data.channels[ch].max = channels[ch];
+            if (channels[ch] < calibration_data.channels[ch].min)
+                calibration_data.channels[ch].min = channels[ch];
+        }
     }
+    LEDPORT = 0;
+
+    set_timer1_clock(timer1_1_4096);
+    timer1_hi = 0;
+    start_timer1();
+    while (timer1_hi < 9)
+        ;
+    stop_timer1();
+
+    LEDPORT = 1;
+    for (u8_t i = 0; i < 255; ++i) {
+        capture_frame();
+        calculate_channels();
+        for (u8_t ch = 0; ch < 2; ++ch) {
+            calibration_data.channels[ch].mid = channels[ch];
+        }
+    }
+    LEDPORT = 0;
+ 
+    set_timer1_clock(timer1_1_4096);
+    timer1_hi = 0;
+    start_timer1();
+    while (timer1_hi < 9)
+        ;
+    stop_timer1();
 }
 
 #pragma optimize=s none
 void capture_frame(void) {
-    input_timer_high = 0;
+    timer1_hi = 0;
     pinb = 0;
     TIFR_TOV1 = 1;
     frame_bits = 0;
     PCMSK = (1<<CH0BIT) | (1<<CH1BIT);
     GIFR_PCIF = 1;
+    set_timer1_clock(timer1_1_8);
     start_timer1();
     GIMSK_PCIE = 1;
-    while(!(frame_bits == 0x0f))
+    while(!(frame_bits == 0x0F))
         ;
     stop_timer1();
 }
 
 void calculate_channels(void) {
-    ch0 = frame[1].v - frame[0].v;
-    ch1 = frame[3].v - frame[2].v;
+    u16_t ch0 = frame[1].v - frame[0].v;
+    i16_t ch1 = frame[3].v - frame[2].v;
+
+    ch1 -= calibration_data.channels[1].mid;
+    ch1 /= 2;
+
+    u16_t ch0_ = ch0 + ch1;
+    if (ch0_ > calibration_data.channels[0].max)
+        ch0_ = calibration_data.channels[0].max;
+    if (ch0_ < calibration_data.channels[0].min)
+        ch0_ = calibration_data.channels[0].min;
+    
+    u16_t ch1_ = ch0 - ch1;
+    if (ch1_ > calibration_data.channels[0].max)
+        ch1_ = calibration_data.channels[0].max;
+    if (ch1_ < calibration_data.channels[0].min)
+        ch1_ = calibration_data.channels[0].min;
+
+    channels[0] = ch0_;
+    channels[1] = ch1_;
 }
 
 static void produce_output() {
-    produce_pulse(0, ch0);
-    produce_pulse(1, ch1);
+    produce_pulse(0, channels[0]);
+    produce_pulse(1, channels[1]);
 }
 
 static void setup_timer0(void) {
@@ -186,42 +264,45 @@ static void produce_pulse(u8_t ch, u16_t width) {
         TCCR0A_COM0A0 = 1;
     }
     output_completed = 0;
+    set_timer0_clock(timer0_1_8);
     start_timer0();
     wait_for_output_comletion();
 }
 
-static void wait(u16_t width) {
-    output_timer.v = width;
-    setup_timer0();
-    output_completed = 0;
-    start_timer0();
-    wait_for_output_comletion();
+static void set_timer0_clock(enum timer0_clock_t c) {
+    u8_t tmp = TCCR0B & 0xf8;
+    tmp |= c;
+    TCCR0B = tmp;
 }
 
 static void start_timer0() {
     GTCCR_TSM = 1;
     GTCCR_PSR0 = 1;
-    TCCR0B_CS01 = 1;
     TIFR_TOV0 = 1;
     TIMSK_TOIE0 = 1;
     GTCCR_TSM = 0;
 }
 
 static void stop_timer0() {
-    TCCR0B_CS01 = 0;
+    set_timer0_clock(timer0_off);
+}
+
+static void set_timer1_clock(enum timer1_clock_t c) {
+    u8_t tmp = TCCR1 & 0xf0;
+    tmp |= c;
+    TCCR1 = tmp;
 }
 
 static void start_timer1() {
     GTCCR_TSM = 1;
     GTCCR_PSR1 = 1;
-    TCCR1_CS12 = 1;
     TIFR_TOV1 = 1;
     TIMSK_TOIE1 = 1;
     GTCCR_TSM = 0;
 }
 
 static void stop_timer1() {
-    TCCR1_CS12 = 0;
+    set_timer1_clock(timer1_off);
 }
 
 /* interrupt handlers */
@@ -239,7 +320,7 @@ __interrupt void timer0_ovf(void);
 __interrupt void timer0_compa(void);
 
 __interrupt void timer1_ovf(void) {
-    ++input_timer_high;
+    ++timer1_hi;
 }
 
 __interrupt void timer0_ovf(void) {
@@ -265,18 +346,20 @@ __interrupt void pcint(void) {
     u8_t tof = TIFR_TOV1;
     u8_t timer = TCNT1;
     if (tof || !timer) {
-        ++input_timer_high;
+        ++timer1_hi;
         TIFR_TOV1 = 1;
     }
     u8_t new_pinb = PINB;
     u8_t old_pinb = pinb;
     pinb = new_pinb;
+
     if (old_pinb & (1<<CH0BIT)) {
         /* was high */
         if (!(new_pinb & (1<<CH0BIT))) {
             /* falling edge */
+            /* bit0 set */
             if (frame_bits & 0x01) {
-                frame[1].b.h = input_timer_high;
+                frame[1].b.h = timer1_hi;
                 frame[1].b.l = timer;
                 frame_bits |= 0x02;
             }
@@ -284,8 +367,9 @@ __interrupt void pcint(void) {
     } else {
         if (new_pinb & (1<<CH0BIT)) {
             /* rising edge */
-            if (!(frame_bits & 0x01)) {
-                frame[0].b.h = input_timer_high;
+            /* bit0 reset */
+            if ((frame_bits & 0x01) == 0x00) {
+                frame[0].b.h = timer1_hi;
                 frame[0].b.l = timer;
                 frame_bits |= 0x01;
             }
@@ -296,8 +380,9 @@ __interrupt void pcint(void) {
         /* was high */
         if (!(new_pinb & (1<<CH1BIT))) {
             /* falling edge */
-            if (frame_bits & 0x01) {
-                frame[3].b.h = input_timer_high;
+            /* bit2 set */
+            if (frame_bits & 0x04) {
+                frame[3].b.h = timer1_hi;
                 frame[3].b.l = timer;
                 frame_bits |= 0x08;
             }
@@ -305,15 +390,16 @@ __interrupt void pcint(void) {
     } else {
         if (new_pinb & (1<<CH1BIT)) {
             /* rising edge */
-            if (frame_bits & 0x01) {
-                frame[2].b.h = input_timer_high;
+            /* bit0 set && bit2 reset */
+            if ((frame_bits & 0x05) == 0x01) {
+                frame[2].b.h = timer1_hi;
                 frame[2].b.l = timer;
                 frame_bits |= 0x04;
             }
         }
     }
 
-    if (frame_bits == 0x03) {
+    if (frame_bits == 0x0F) {
         PCMSK = 0;
         GIMSK_PCIE = 0;
         GIFR_PCIF = 0;

@@ -2,7 +2,6 @@
 #define main_h
 
 #include "types.h"
-#include "queue.h"
 
 #define CH0PIN PINB_PINB2
 #define CH0PORT PORTB_PORTB0
@@ -17,59 +16,29 @@
 #define MIN(A, B) ((A) < (B) ? (A) : (B))
 #define MAX(A, B) ((A) > (B) ? (A) : (B))
 
+enum timer0_clock_t {
+    timer0_off = 0,
+    timer0_1_8 = (1 << CS01)
+};
+
+enum timer1_clock_t {
+    timer1_off = 0,
+    timer1_1_8 = (1 << CS12),
+    timer1_1_4096 = (1 << CS13) | (1 << CS12) | (1 << CS10)
+};
+
 enum {
-    channel_queue_size = 8,
-    clock = 8000000,
-    timer_clock = clock / 8,
-    calibration_seconds = 1,
-    calibration_periods_count = 10,
-    calibration_period_channel = 1,
     default_channel_value = 1500,
-    default_period_value = 20000
+    calibration_periods = 300,
+    checksum_seed = 1
 };
 
-typedef u16_t channel_queue_value_t;
-
-QUEUE_TYPE(channel);
-
-struct input_t {
-    u16_t timer;
-};
-
-struct output_t {
-    u16_t width;
-    u16_t width_current;
-};
-
-struct mailbox_t {
-    u8_t not_empty;
-    u8_t flag;
-    u16_t value;
-};
-
-struct stats_t {
-    u16_t width_sum;
-    u16_t min;
-    u16_t max;
-};
-
-struct channel_state_t {
-    struct input_t input;
-    struct output_t output;
-    struct mailbox_t mailbox;
-    struct stats_t stats;
-};
-
-struct eeprom_t {
-    u8_t osccal;
-    u16_t period;
+struct calibration_data_t {
     struct channel_t {
         u16_t min;
         u16_t max;
+        u16_t mid;
     } channels[2];
 };
-    
-
-typedef void (*on_value_t)(u8_t channel, u16_t value);
 
 #endif
