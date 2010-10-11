@@ -77,6 +77,7 @@ static union {
 } output_timer;
 static u16_t channels[2] = { default_channel_value, default_channel_value };
 struct calibration_data_t calibration_data;
+static u16_t throttle_low_threshold;
 
 __eeprom struct calibration_data_t calibration_data_eeprom;
 __eeprom u8_t eeprom_checksum;
@@ -86,6 +87,7 @@ static u8_t calibration_load(void);
 static void calibrate(void);
 static void capture_frame(void);
 static void calculate_channels(void);
+static void transform_channels(void);
 static void produce_output(void);
 static void setup_timer0(void);
 static void wait_for_output_comletion(void);
@@ -104,17 +106,19 @@ void main(void) {
     if (calibration) {
         calibrate();
         calibration_store();
-        LEDPORT = 1;
     } else {
         if (calibration_load()) {
+            throttle_low_threshold = calibration_data.channels[0].min
+                + (calibration_data.channels[0].max - calibration_data.channels[0].min) / 16;
             while(1) {
                 capture_frame();
                 calculate_channels();
+                transform_channels();
                 produce_output();
             }
         }
-        LEDPORT = 1;
     }
+    LEDPORT = 1;
 }
 
 static u8_t calculate_checksum(void) {
@@ -200,19 +204,32 @@ void capture_frame(void) {
 }
 
 void calculate_channels(void) {
-    u16_t ch0 = frame[1].v - frame[0].v;
-    i16_t ch1 = frame[3].v - frame[2].v;
+    channels[0] = frame[1].v - frame[0].v;
+    channels[1] = frame[3].v - frame[2].v;
+}
 
-    ch1 -= calibration_data.channels[1].mid;
-    ch1 /= 2;
+void transform_channels(void) {
+    u16_t ch0 = channels[0];
+    i16_t ch1 = channels[1];
 
-    u16_t ch0_ = ch0 + ch1;
+    u16_t ch0_;
+    u16_t ch1_;
+
+    if (ch0 < throttle_low_threshold) {
+        ch0_ = ch0;
+        ch1_ = ch0;
+    } else {
+        ch1 -= calibration_data.channels[1].mid;
+        ch1 /= 2;
+        ch0_ = ch0 + ch1;
+        ch1_ = ch0 - ch1;
+    }
+
     if (ch0_ > calibration_data.channels[0].max)
         ch0_ = calibration_data.channels[0].max;
     if (ch0_ < calibration_data.channels[0].min)
         ch0_ = calibration_data.channels[0].min;
     
-    u16_t ch1_ = ch0 - ch1;
     if (ch1_ > calibration_data.channels[0].max)
         ch1_ = calibration_data.channels[0].max;
     if (ch1_ < calibration_data.channels[0].min)
