@@ -39,6 +39,8 @@ struct calibration_data_t {
         u16_t max;
         u16_t mid;
     } channels[2];
+    u16_t throttle_low;
+    u16_t throttle_high;
 };
 
 #endif

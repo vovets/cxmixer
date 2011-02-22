@@ -98,6 +98,7 @@ static void stop_timer0(void);
 static void set_timer1_clock(enum timer1_clock_t c);
 static void start_timer1(void);
 static void stop_timer1(void);
+static void wait_on_timer1(void);
 
 void main(void) {
     u8_t calibration = is_jumper_installed();
@@ -144,6 +145,16 @@ static u8_t calibration_load(void) {
 }
 
 #pragma optimize=s none
+static void wait_on_timer1(void) {
+    set_timer1_clock(timer1_1_4096);
+    timer1_hi = 0;
+    start_timer1();
+    while (timer1_hi < 9)
+        ;
+    stop_timer1();
+}
+
+#pragma optimize=s none
 void calibrate(void) {
     calibration_data.channels[0].min = 0xffff;
     calibration_data.channels[1].min = 0xffff;
@@ -162,12 +173,7 @@ void calibrate(void) {
     }
     LEDPORT = 0;
 
-    set_timer1_clock(timer1_1_4096);
-    timer1_hi = 0;
-    start_timer1();
-    while (timer1_hi < 9)
-        ;
-    stop_timer1();
+    wait_on_timer1();
 
     LEDPORT = 1;
     for (u8_t i = 0; i < 255; ++i) {
@@ -179,12 +185,7 @@ void calibrate(void) {
     }
     LEDPORT = 0;
  
-    set_timer1_clock(timer1_1_4096);
-    timer1_hi = 0;
-    start_timer1();
-    while (timer1_hi < 9)
-        ;
-    stop_timer1();
+    wait_on_timer1();
 }
 
 #pragma optimize=s none
