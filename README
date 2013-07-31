@@ -1,2 +1,2 @@
-This project aimed to create flexible and open sourced program for throttle/rudder mixer for coaxial RC helicopter models.
+This project is aimed to create flexible and open sourced program for throttle/rudder mixer for coaxial RC helicopter models.
 Currently it is written in C using IAR Systems Embedded Workbench compiler and targets AVR ATtiny45 MCU.
